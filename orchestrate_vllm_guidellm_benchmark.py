@@ -3,8 +3,8 @@
 vLLM (Podman) + GuideLLM benchmark orchestrator.
 
 Execution order per run:
-  1. Start container, sample metrics, run GuideLLM, stop container.
-  2. Dashboard CSV: always write ``dashboard_benchmark.csv`` when GuideLLM JSON exists, then optional concurrency graphs (PNG); optionally append to ``--dashboard-csv``.
+  1. Start container, sample metrics, run GuideLLM, stop container (writes ``run_config.json`` from the suite/CLI config).
+  2. Dashboard CSV: always write ``dashboard_benchmark.csv`` when GuideLLM JSON exists, then optional concurrency graphs (PNG); optionally append to ``--dashboard-csv``. If ``mlflow_tags`` includes ``project``, it is appended to ``--dashboard-version`` for the performance-dashboard import script.
   3. Optional: single MLflow upload (tags, params, metrics, artifacts) — last step only.
 
 See vllm_guidellm_benchmark/README.md for setup and examples.
@@ -341,6 +341,25 @@ def merge_tags(auto: dict[str, str], user: dict[str, str] | None) -> dict[str, s
     if user:
         merged.update(user)
     return merged
+
+
+def dashboard_version_for_import(
+    base_version: str,
+    mlflow_tags: dict[str, str] | None,
+) -> str:
+    """If ``mlflow_tags`` contains a non-empty ``project`` tag, append it to ``--version`` for the dashboard import script."""
+    base = (base_version or "").strip()
+    if not mlflow_tags:
+        return base_version
+    raw = mlflow_tags.get("project")
+    if raw is None:
+        return base_version
+    proj = str(raw).strip()
+    if not proj:
+        return base_version
+    if not base:
+        return proj
+    return f"{base}-{proj}"
 
 
 def run_podman_detached(*, run_podman_sh: Path, env: dict[str, str]) -> None:
@@ -903,6 +922,7 @@ def iter_benchmark_artifact_paths(rr: ResolvedRun) -> list[Path]:
         rr.run_dir / "host_samples.tsv",
         gj,
         rr.run_dir / "run_manifest.json",
+        rr.run_dir / "run_config.json",
         rr.run_dir / DASHBOARD_CSV_IN_RUN_DIR,
         rr.run_dir / GRAPH_OUTPUT_TOK,
         rr.run_dir / GRAPH_ITL,
@@ -1053,8 +1073,18 @@ def resolve_run(cfg: dict[str, Any], args: argparse.Namespace) -> ResolvedRun:
     )
 
 
-def execute_benchmark_phase(rr: ResolvedRun, args: argparse.Namespace) -> None:
+def execute_benchmark_phase(
+    rr: ResolvedRun,
+    args: argparse.Namespace,
+    *,
+    run_config: dict[str, Any] | None = None,
+) -> None:
     rr.run_dir.mkdir(parents=True, exist_ok=True)
+    if run_config is not None:
+        (rr.run_dir / "run_config.json").write_text(
+            json.dumps(run_config, indent=2, default=str),
+            encoding="utf-8",
+        )
     materialize_merged_extra_env(rr)
     manifest = {
         "run_id": rr.run_id,
@@ -1152,6 +1182,10 @@ def finalize_after_benchmark(rr: ResolvedRun, args: argparse.Namespace) -> None:
 
     if gj.is_file():
         per_run_dashboard = rr.run_dir / DASHBOARD_CSV_IN_RUN_DIR
+        dash_version = dashboard_version_for_import(
+            args.dashboard_version,
+            rr.user_mlflow_tags,
+        )
         print(
             f"Writing dashboard-format CSV for this run: {per_run_dashboard}",
             flush=True,
@@ -1161,7 +1195,7 @@ def finalize_after_benchmark(rr: ResolvedRun, args: argparse.Namespace) -> None:
             json_path=gj,
             csv_path=per_run_dashboard,
             model=rr.model,
-            version=args.dashboard_version,
+            version=dash_version,
             tp=args.dashboard_tp,
             accelerator=args.dashboard_accelerator,
             runtime_args=runtime_args_str,
@@ -1180,7 +1214,7 @@ def finalize_after_benchmark(rr: ResolvedRun, args: argparse.Namespace) -> None:
                 json_path=gj,
                 csv_path=args.dashboard_csv,
                 model=rr.model,
-                version=args.dashboard_version,
+                version=dash_version,
                 tp=args.dashboard_tp,
                 accelerator=args.dashboard_accelerator,
                 runtime_args=runtime_args_str,
@@ -1254,7 +1288,7 @@ def single_benchmark(cfg: dict[str, Any], args: argparse.Namespace) -> None:
     rr = resolve_run(cfg, args)
     rr.run_dir.mkdir(parents=True, exist_ok=True)
     with tee_stdout_stderr_to_run_dir(rr.run_dir):
-        execute_benchmark_phase(rr, args)
+        execute_benchmark_phase(rr, args, run_config=cfg)
         finalize_after_benchmark(rr, args)
 
 
