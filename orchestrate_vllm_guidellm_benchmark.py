@@ -58,6 +58,8 @@ MLFLOW_TAG_VALUE_MAX = 500
 
 # Performance-dashboard format (import_manual_runs_json_v2.py), copied per run for analysis.
 DASHBOARD_CSV_IN_RUN_DIR = "dashboard_benchmark.csv"
+# Passed as --version to import_manual_runs_json_v2.py; override with --dashboard-version.
+DEFAULT_DASHBOARD_IMPORT_VERSION = "vllm-v0.18.0"
 
 GRAPH_OUTPUT_TOK = "graph_concurrency_output_tok_per_sec.png"
 GRAPH_ITL = "graph_concurrency_itl.png"
@@ -734,6 +736,7 @@ class ResolvedRun:
     user_mlflow_tags: dict[str, str] = field(default_factory=dict)
     extra_env_file_path: Path | None = None
     container_env_inline: dict[str, str] = field(default_factory=dict)
+    dashboard_version: str = DEFAULT_DASHBOARD_IMPORT_VERSION
 
 
 def _truncate_for_plot(s: str, max_len: int) -> str:
@@ -1032,6 +1035,8 @@ def resolve_run(cfg: dict[str, Any], args: argparse.Namespace) -> ResolvedRun:
     edf = cfg.get("extra_docker_run_file", args.extra_docker_run_file)
     if edf:
         podman_env["EXTRA_DOCKER_RUN_FILE"] = str(edf)
+    if cfg.get("vllm_use_image_entrypoint"):
+        podman_env["VLLM_USE_IMAGE_ENTRYPOINT"] = "1"
 
     utags: dict[str, str] = {}
     cfg_tags = cfg.get("mlflow_tags")
@@ -1039,6 +1044,8 @@ def resolve_run(cfg: dict[str, Any], args: argparse.Namespace) -> ResolvedRun:
         utags = {str(k): str(v) for k, v in cfg_tags.items()}
     cli_tags = args.mlflow_tags or {}
     utags = {**utags, **{str(k): str(v) for k, v in cli_tags.items()}}
+
+    dashboard_version = str(cfg.get("dashboard_version", args.dashboard_version))
 
     return ResolvedRun(
         model=model,
@@ -1070,6 +1077,7 @@ def resolve_run(cfg: dict[str, Any], args: argparse.Namespace) -> ResolvedRun:
         user_mlflow_tags=utags,
         extra_env_file_path=extra_path,
         container_env_inline=container_env_inline,
+        dashboard_version=dashboard_version,
     )
 
 
@@ -1103,6 +1111,7 @@ def execute_benchmark_phase(
         "vllm_image": rr.vllm_image,
         "container_env": rr.container_env,
         "podman_launch_env": {k: v for k, v in rr.podman_env.items() if k != "DETACHED"},
+        "dashboard_version": rr.dashboard_version,
     }
     manifest_path = rr.run_dir / "run_manifest.json"
     manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
@@ -1183,7 +1192,7 @@ def finalize_after_benchmark(rr: ResolvedRun, args: argparse.Namespace) -> None:
     if gj.is_file():
         per_run_dashboard = rr.run_dir / DASHBOARD_CSV_IN_RUN_DIR
         dash_version = dashboard_version_for_import(
-            args.dashboard_version,
+            rr.dashboard_version,
             rr.user_mlflow_tags,
         )
         print(
@@ -1400,7 +1409,13 @@ def parse_args() -> argparse.Namespace:
         help="Optional consolidated CSV to append to (per-run dashboard_benchmark.csv is always written when GuideLLM JSON exists)",
     )
     p.add_argument("--import-script", type=Path, default=DEFAULT_IMPORT_SCRIPT)
-    p.add_argument("--dashboard-version", default="vLLM-0.18.0-cpu")
+    p.add_argument(
+        "--dashboard-version",
+        default=DEFAULT_DASHBOARD_IMPORT_VERSION,
+        help=(
+            f"Value for import_manual_runs_json_v2.py --version (default: {DEFAULT_DASHBOARD_IMPORT_VERSION!r})"
+        ),
+    )
     p.add_argument("--dashboard-tp", type=int, default=1)
     p.add_argument("--dashboard-accelerator", default="CPU")
     p.add_argument("--dashboard-guidellm-version", default="0.5.x")
